@@ -95,13 +95,19 @@ def _python_type(type_str: str) -> str:
     return mapping.get(type_str.lower(), "str")
 
 
-def render_pyproject(package_name: str, description: str) -> str:
+def render_pyproject(package_name: str, description: str, *, paid: bool = False) -> str:
     module_name = _to_module_name(package_name)
-    return PYPROJECT_TEMPLATE.format(
+    base = PYPROJECT_TEMPLATE.format(
         package_name=package_name,
         description=description,
         module_name=module_name,
     )
+    if paid:
+        base = base.replace(
+            '    "mcp[cli]>=1.0.0",\n]',
+            '    "mcp[cli]>=1.0.0",\n    "mcp-marketplace-license>=1.0.0",\n]',
+        )
+    return base
 
 
 def render_gitignore() -> str:
@@ -116,32 +122,70 @@ def render_transport(package_name: str) -> str:
     return TRANSPORT_TEMPLATE.format(package_name=package_name)
 
 
-def render_env_example(env_vars: list[dict] | None) -> str | None:
-    """Render .env.example if env vars are declared. Returns None if no vars."""
-    if not env_vars:
+def render_env_example(
+    env_vars: list[dict] | None,
+    *,
+    paid: bool = False,
+    hosting: str = "local",
+) -> str | None:
+    """Render .env.example if env vars are declared or paid/remote. Returns None if nothing needed."""
+    has_vars = bool(env_vars) or paid or hosting == "remote"
+    if not has_vars:
         return None
     lines = ["# Environment variables for this MCP server", ""]
-    for var in env_vars:
-        name = var.get("name", "UNKNOWN")
-        desc = var.get("description", "")
-        required = var.get("required", True)
-        tag = "required" if required else "optional"
-        lines.append(f"# {desc} ({tag})")
-        lines.append(f"{name}=")
+    if paid:
+        lines.append("# License key for paid features (required)")
+        lines.append("# Get one at mcp-marketplace.io")
+        lines.append("MCP_LICENSE_KEY=")
         lines.append("")
+    if hosting == "remote":
+        lines.append("# Server port (optional, default 8000)")
+        lines.append("PORT=8000")
+        lines.append("")
+    if env_vars:
+        for var in env_vars:
+            name = var.get("name", "UNKNOWN")
+            desc = var.get("description", "")
+            required = var.get("required", True)
+            tag = "required" if required else "optional"
+            lines.append(f"# {desc} ({tag})")
+            lines.append(f"{name}=")
+            lines.append("")
     return "\n".join(lines)
 
 
-def render_server(package_name: str, tools: list[dict]) -> str:
+def render_server(
+    package_name: str,
+    tools: list[dict],
+    *,
+    paid: bool = False,
+    paid_tools: list[str] | None = None,
+    hosting: str = "local",
+) -> str:
     """Render the main server.py with FastMCP and tool registrations."""
     module_name = _to_module_name(package_name)
+    gated = set(paid_tools or [])
+
     lines = [
         f'"""MCP server for {package_name}."""',
         "",
-        "from mcp.server.fastmcp import FastMCP",
-        "",
-        "# --- IMPORTS ---",
     ]
+
+    if paid:
+        lines.append("import json")
+        lines.append("")
+
+    if hosting == "remote":
+        lines.append("import os")
+        lines.append("")
+
+    lines.append("from mcp.server.fastmcp import FastMCP")
+
+    if paid:
+        lines.append("from mcp_marketplace_license import verify_license")
+
+    lines.append("")
+    lines.append("# --- IMPORTS ---")
 
     for tool in tools:
         tool_name = tool["name"]
@@ -152,6 +196,23 @@ def render_server(package_name: str, tools: list[dict]) -> str:
     lines.append("# --- END IMPORTS ---")
     lines.append("")
     lines.append(f'mcp = FastMCP("{package_name}")')
+
+    if paid:
+        lines.append("")
+        lines.append("")
+        lines.append("def _require_license(tool_name: str) -> str | None:")
+        lines.append('    """Return None if licensed, or a JSON error string."""')
+        lines.append(f'    result = verify_license(slug="{package_name}")')
+        lines.append('    if result.get("valid"):')
+        lines.append("        return None")
+        lines.append("    return json.dumps({")
+        lines.append('        "error": "premium_required",')
+        lines.append('        "reason": result.get("reason", "unknown"),')
+        lines.append("        \"message\": f\"The '{tool_name}' tool requires a license. \"")
+        lines.append(f'            "Set MCP_LICENSE_KEY to unlock it. "')
+        lines.append(f'            "Get your key at https://mcp-marketplace.io/server/{package_name}",')
+        lines.append("    })")
+
     lines.append("")
     lines.append("# --- TOOLS ---")
 
@@ -159,6 +220,7 @@ def render_server(package_name: str, tools: list[dict]) -> str:
         tool_name = tool["name"]
         tool_desc = tool.get("description", f"{tool_name} tool")
         params = tool.get("parameters", [])
+        is_gated = paid and (not gated or tool_name in gated)
 
         # Build parameter list
         param_parts = []
@@ -179,19 +241,28 @@ def render_server(package_name: str, tools: list[dict]) -> str:
                 param_parts.append(f"{pname}: {ptype} = {default_str}")
 
         param_str = ", ".join(param_parts)
+        call_args = ", ".join(p["name"] for p in params)
 
         lines.append("")
         lines.append(f'@mcp.tool(description="{tool_desc}")')
         lines.append(f"def {tool_name}({param_str}) -> str:")
         lines.append(f'    """Call the {tool_name} tool."""')
-        lines.append(f"    return _{tool_name}_impl({', '.join(p['name'] for p in params)})")
+        if is_gated:
+            lines.append(f'    err = _require_license("{tool_name}")')
+            lines.append("    if err:")
+            lines.append("        return err")
+        lines.append(f"    return _{tool_name}_impl({call_args})")
 
     lines.append("# --- END TOOLS ---")
     lines.append("")
     lines.append("")
     lines.append("def main():")
     lines.append('    """Run the MCP server."""')
-    lines.append("    mcp.run()")
+    if hosting == "remote":
+        lines.append('    port = int(os.environ.get("PORT", "8000"))')
+        lines.append('    mcp.run(transport="sse", host="0.0.0.0", port=port)')
+    else:
+        lines.append("    mcp.run()")
     lines.append("")
     lines.append("")
     lines.append('if __name__ == "__main__":')
@@ -372,7 +443,14 @@ def render_test_tool(package_name: str, tool: dict) -> str:
     return "\n".join(lines)
 
 
-def render_readme(package_name: str, description: str, tools: list[dict]) -> str:
+def render_readme(
+    package_name: str,
+    description: str,
+    tools: list[dict],
+    *,
+    paid: bool = False,
+    hosting: str = "local",
+) -> str:
     """Render README.md for the generated project."""
     module_name = _to_module_name(package_name)
 
@@ -380,51 +458,91 @@ def render_readme(package_name: str, description: str, tools: list[dict]) -> str
         f"- **{t['name']}** — {t.get('description', t['name'])}" for t in tools
     )
 
-    return f"""\
-# {package_name}
+    sections = [f"# {package_name}", "", description, ""]
 
-{description}
+    if hosting == "local":
+        sections += [
+            "## Install", "",
+            "```bash", f"pip install {package_name}", "```", "",
+        ]
+    else:
+        sections += [
+            "## Connect", "",
+            "This is a remote MCP server. Add to your Claude Code config:", "",
+            "```json", "{", f'  "mcpServers": {{', f'    "{package_name}": {{',
+            f'      "url": "https://your-server.com/mcp"',
+            "    }", "  }", "}", "```", "",
+        ]
 
-## Install
+    sections += ["## Tools", "", tool_list, ""]
 
-```bash
-pip install {package_name}
-```
+    if paid:
+        sections += [
+            "## License Key", "",
+            f"This server requires a license key from [MCP Marketplace](https://mcp-marketplace.io/server/{package_name}).", "",
+            "Set the `MCP_LICENSE_KEY` environment variable:", "",
+            "```bash", "export MCP_LICENSE_KEY=mcp_live_your_key_here", "```", "",
+        ]
 
-## Tools
+    if hosting == "local":
+        sections += [
+            "## Usage with Claude Code", "",
+            "Add to your Claude Code MCP config (`~/.claude/settings.json`):", "",
+            "```json", "{{", '  "mcpServers": {{',
+            f'    "{package_name}": {{',
+            f'      "command": "{package_name}",',
+            '      "args": []',
+        ]
+        if paid:
+            sections[-1] = '      "args": [],'
+            sections += [
+                f'      "env": {{ "MCP_LICENSE_KEY": "mcp_live_your_key_here" }}',
+            ]
+        sections += ["    }}", "  }}", "}}", "```", ""]
+    elif hosting == "remote":
+        sections += [
+            "## Deployment", "",
+            "```bash", "docker build -t " + package_name + " .",
+            "docker run -p 8000:8000 " + package_name, "```", "",
+        ]
 
-{tool_list}
+    sections += [
+        "## Development", "",
+        "```bash",
+        f"git clone https://github.com/YOUR_USERNAME/{package_name}.git",
+        f"cd {package_name}",
+        "uv venv .venv && source .venv/bin/activate",
+        'uv pip install -e ".[dev]"',
+        "pytest -v",
+        "```",
+        "",
+    ]
 
-## Usage with Claude Code
-
-Add to your Claude Code MCP config (`~/.claude/settings.json`):
-
-```json
-{{
-  "mcpServers": {{
-    "{package_name}": {{
-      "command": "{package_name}",
-      "args": []
-    }}
-  }}
-}}
-```
-
-## Development
-
-```bash
-git clone https://github.com/YOUR_USERNAME/{package_name}.git
-cd {package_name}
-uv venv .venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-pytest -v
-```
-"""
+    return "\n".join(sections)
 
 
 def _to_class_name(snake_name: str) -> str:
     """Convert snake_case to PascalCase."""
     return "".join(word.capitalize() for word in snake_name.split("_"))
+
+
+def render_dockerfile(package_name: str) -> str:
+    """Render a Dockerfile for remote hosting."""
+    return f"""\
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY . .
+
+RUN pip install --no-cache-dir .
+
+ENV PORT=8000
+
+EXPOSE ${{PORT}}
+
+CMD ["{package_name}"]
+"""
 
 
 def render_add_tool_import(package_name: str, tool_name: str) -> str:

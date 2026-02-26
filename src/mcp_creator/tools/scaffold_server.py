@@ -14,6 +14,9 @@ def scaffold_server(
     tools: str,
     output_dir: str = ".",
     env_vars: str | None = None,
+    paid: bool = False,
+    paid_tools: str | None = None,
+    hosting: str = "local",
 ) -> str:
     """Scaffold a complete, runnable MCP server project.
 
@@ -28,30 +31,42 @@ def scaffold_server(
         output_dir: Parent directory where the project folder is created.
         env_vars: Optional JSON string — list of env var defs:
                   [{"name": "API_KEY", "description": "...", "required": true}]
+        paid: If true, add license key gating via mcp-marketplace-license SDK.
+        paid_tools: Optional JSON string — list of tool names to gate behind license.
+                    If omitted and paid=true, all tools are gated.
+        hosting: "local" (default, stdio) or "remote" (SSE/HTTP for hosted model).
 
     Returns:
         JSON string with created files and next steps.
     """
     tool_defs = json.loads(tools)
     env_var_defs = json.loads(env_vars) if env_vars else None
+    paid_tool_list = json.loads(paid_tools) if paid_tools else None
     module_name = codegen._to_module_name(package_name)
 
     # Build file dict: relative_path -> content
     files: dict[str, str] = {}
 
     # Root files
-    files["pyproject.toml"] = codegen.render_pyproject(package_name, description)
+    files["pyproject.toml"] = codegen.render_pyproject(package_name, description, paid=paid)
     files[".gitignore"] = codegen.render_gitignore()
-    files["README.md"] = codegen.render_readme(package_name, description, tool_defs)
+    files["README.md"] = codegen.render_readme(
+        package_name, description, tool_defs, paid=paid, hosting=hosting,
+    )
 
-    env_content = codegen.render_env_example(env_var_defs)
+    env_content = codegen.render_env_example(env_var_defs, paid=paid, hosting=hosting)
     if env_content:
         files[".env.example"] = env_content
+
+    if hosting == "remote":
+        files["Dockerfile"] = codegen.render_dockerfile(package_name)
 
     # Source package
     src = f"src/{module_name}"
     files[f"{src}/__init__.py"] = codegen.render_init(package_name)
-    files[f"{src}/server.py"] = codegen.render_server(package_name, tool_defs)
+    files[f"{src}/server.py"] = codegen.render_server(
+        package_name, tool_defs, paid=paid, paid_tools=paid_tool_list, hosting=hosting,
+    )
     files[f"{src}/transport.py"] = codegen.render_transport(package_name)
 
     # Tools and services
@@ -84,6 +99,8 @@ def scaffold_server(
         "files_created": len(written),
         "file_list": sorted(files.keys()),
         "module_name": module_name,
+        "paid": paid,
+        "hosting": hosting,
         "next_steps": [
             f"Project scaffolded at {project_dir}",
             f"cd {project_dir} && uv venv .venv && source .venv/bin/activate && uv pip install -e '.[dev]'",
@@ -92,5 +109,14 @@ def scaffold_server(
             "When ready, use build_package to build and publish_package to publish to PyPI.",
         ],
     }
+
+    if paid:
+        result["next_steps"].append(
+            "License gating is enabled. Users need MCP_LICENSE_KEY to use paid tools."
+        )
+    if hosting == "remote":
+        result["next_steps"].append(
+            "Remote hosting enabled. Use 'docker build' and 'docker run' to deploy."
+        )
 
     return json.dumps(result, indent=2)

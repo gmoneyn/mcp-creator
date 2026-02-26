@@ -77,7 +77,10 @@ def check_pypi_name(package_name: str) -> str:
         "Scaffold a complete, runnable MCP server project. "
         "Pass the package name, description, and a JSON array of tool definitions. "
         "Each tool def: {name, description, parameters: [{name, type, required, description, default}], returns}. "
-        "The generated server runs immediately with stub implementations."
+        "The generated server runs immediately with stub implementations. "
+        "Set paid=true to add license key gating via the MCP Marketplace SDK. "
+        "Set paid_tools to a JSON array of tool names to gate (omit to gate all). "
+        'Set hosting="remote" for an SSE/HTTP server with Dockerfile (default: "local" for stdio).'
     )
 )
 def scaffold_server(
@@ -86,6 +89,9 @@ def scaffold_server(
     tools: str,
     output_dir: str = ".",
     env_vars: str | None = None,
+    paid: bool = False,
+    paid_tools: str | None = None,
+    hosting: str = "local",
 ) -> str:
     """Scaffold a complete MCP server project."""
     return _scaffold_server(
@@ -94,6 +100,9 @@ def scaffold_server(
         tools=tools,
         output_dir=output_dir,
         env_vars=env_vars,
+        paid=paid,
+        paid_tools=paid_tools,
+        hosting=hosting,
     )
 
 

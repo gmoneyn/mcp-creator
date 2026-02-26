@@ -153,7 +153,8 @@ def setup_github(
 @mcp.tool(
     description=(
         "Generate a LAUNCHGUIDE.md for MCP Marketplace submission. "
-        "Creates a formatted file ready to submit at mcp-marketplace.io."
+        "Creates a formatted file ready to submit at mcp-marketplace.io. "
+        "Limits: tagline max 100 chars, features max 30 items, tags max 30."
     )
 )
 def generate_launchguide(

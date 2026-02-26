@@ -57,9 +57,9 @@ def generate_launchguide(
         tagline: One-liner (max 100 chars).
         description: What the server does, how it works, who it's for.
         category: One of: Developer Tools, Data & Analytics, Productivity, etc.
-        features: Bullet-point features (one per line, prefixed with "- ").
+        features: Bullet-point features (one per line, prefixed with "- "). Max 30 items.
         tools_summary: Tool descriptions for Getting Started (one per line).
-        tags: Comma-separated tags.
+        tags: Comma-separated tags. Max 30.
         setup_requirements: Env vars or setup steps (default: none required).
         docs_url: Link to docs or README.
 

@@ -105,7 +105,7 @@ def render_pyproject(package_name: str, description: str, *, paid: bool = False)
     if paid:
         base = base.replace(
             '    "mcp[cli]>=1.0.0",\n]',
-            '    "mcp[cli]>=1.0.0",\n    "mcp-marketplace-license>=1.0.0",\n]',
+            '    "mcp[cli]>=1.0.0",\n    "mcp-marketplace-license>=1.1.0",\n]',
         )
     return base
 

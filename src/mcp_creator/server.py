@@ -173,10 +173,12 @@ def generate_launchguide(
     description: str,
     category: str,
     features: str,
-    tools_summary: str,
     tags: str,
     setup_requirements: str = "No environment variables required.",
     docs_url: str = "",
+    use_cases: str = "",
+    getting_started: str = "",
+    tools_summary: str = "",
 ) -> str:
     """Generate LAUNCHGUIDE.md."""
     return _generate_launchguide(
@@ -186,10 +188,12 @@ def generate_launchguide(
         description=description,
         category=category,
         features=features,
-        tools_summary=tools_summary,
         tags=tags,
         setup_requirements=setup_requirements,
         docs_url=docs_url,
+        use_cases=use_cases,
+        getting_started=getting_started,
+        tools_summary=tools_summary,
     )
 
 

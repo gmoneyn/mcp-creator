@@ -53,6 +53,17 @@ Or for Cursor (`.cursor/mcp.json`):
 | `setup_github` | Initialize git, create a GitHub repo, and push the code |
 | `generate_launchguide` | Create LAUNCHGUIDE.md for marketplace submission |
 
+## Publish to MCP Marketplace
+
+Once your server is on PyPI, list it on [MCP Marketplace](https://mcp-marketplace.io/for-creators) to reach thousands of AI users:
+
+- **Security scanning** — every submission is automatically scanned, and the score is shown to users
+- **One-click install** — users add your server to Claude, Cursor, or any MCP client in one click
+- **Built-in payments** — set a price (one-time or subscription), connect Stripe, and keep 85% of every sale
+- **Creator dashboard** — track installs, revenue, reviews, and license keys
+
+Run `generate_launchguide` after publishing to create your submission file, then submit at [mcp-marketplace.io/submit](https://mcp-marketplace.io/submit).
+
 ## How It Works
 
 1. **Tell your AI what you want to build**: "I want an MCP server that checks the weather"

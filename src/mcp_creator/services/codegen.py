@@ -14,7 +14,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {{ text = "MIT" }}
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp[cli]>=2.0.0",  # v2 REQUIRED: this template emits `from mcp.server import MCPServer` (2.x). 1.x has no MCPServer and 2.x has no mcp.server.fastmcp, so the floor and the emitted code must move together.
 ]
 
 [project.scripts]
@@ -57,7 +57,10 @@ INIT_TEMPLATE = '""""{package_name} MCP server."""\n'
 TRANSPORT_TEMPLATE = """\
 \"\"\"Transport helpers for {package_name}.\"\"\"
 
+import os
 import sys
+
+from mcp.server.transport_security import TransportSecuritySettings
 
 
 def run_stdio(mcp_app):
@@ -66,9 +69,25 @@ def run_stdio(mcp_app):
 
 
 def run_http(mcp_app, host: str = "0.0.0.0", port: int = 8000):
-    \"\"\"Run the MCP server over HTTP (for remote hosting).\"\"\"
-    mcp_app.run(transport="sse", host=host, port=port)
+    \"\"\"Run the MCP server over Streamable HTTP (for remote hosting).\"\"\"
+    allowed = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    if host not in ("127.0.0.1", "localhost") and not allowed:
+        sys.exit(
+            "[mcp] REFUSING TO START: non-localhost bind requires MCP_ALLOWED_HOSTS "
+            "or Host/Origin validation is disabled (DNS-rebinding exposure)."
+        )
+    sec = TransportSecuritySettings(allowed_hosts=allowed) if allowed else None
+    mcp_app.run(transport="streamable-http", host=host, port=port, transport_security=sec)
 """
+
+
+def _ordered_params(parameters):
+    """Required params first, optional after — Python forbids a non-default arg
+    following a default one, so input order alone emits `def f(opt=None, req)`,
+    a SyntaxError. Stable within each group so declared order is otherwise kept."""
+    req = [p for p in parameters if p.get("required", True)]
+    opt = [p for p in parameters if not p.get("required", True)]
+    return req + opt
 
 
 def _to_module_name(package_name: str) -> str:
@@ -103,10 +122,22 @@ def render_pyproject(package_name: str, description: str, *, paid: bool = False)
         module_name=module_name,
     )
     if paid:
-        base = base.replace(
-            '    "mcp[cli]>=1.0.0",\n]',
-            '    "mcp[cli]>=1.0.0",\n    "mcp-marketplace-license>=1.1.0",\n]',
-        )
+        # Anchor on the CLOSING BRACKET of the dependencies list, not on the mcp pin —
+        # a previous edit to the pin string silently broke this replace and paid servers
+        # scaffolded with NO license dependency (money path, failed silently). Assert it.
+        # Anchor on a UNIQUE boundary, not a bare ']' — a bare bracket also matches the
+        # dev-dependencies list, which would license the wrong list. And do NOT use assert:
+        # it is stripped under `python -O`, restoring the silent no-op this replaces.
+        marker = ']\n\n[project.scripts]'
+        if base.count(marker) != 1:
+            raise RuntimeError(
+                "pyproject template shape changed: expected exactly one "
+                f"'{marker!r}' boundary, found {base.count(marker)}. "
+                "Paid license-dependency injection would silently no-op."
+            )
+        base = base.replace(marker, '    "mcp-marketplace-license>=1.1.0",\n' + marker, 1)
+        if 'mcp-marketplace-license' not in base.split('[project.scripts]')[0]:
+            raise RuntimeError("license dependency did not land in [project.dependencies]")
     return base
 
 
@@ -162,7 +193,7 @@ def render_server(
     paid_tools: list[str] | None = None,
     hosting: str = "local",
 ) -> str:
-    """Render the main server.py with FastMCP and tool registrations."""
+    """Render the main server.py with MCPServer (mcp SDK v2) and tool registrations."""
     module_name = _to_module_name(package_name)
     gated = set(paid_tools or [])
 
@@ -179,7 +210,10 @@ def render_server(
         lines.append("import os")
         lines.append("")
 
-    lines.append("from mcp.server.fastmcp import FastMCP")
+    lines.append("from mcp.server import MCPServer")
+    if hosting == "remote":
+        lines.append("import sys")
+        lines.append("from mcp.server.transport_security import TransportSecuritySettings")
 
     if paid:
         lines.append("from mcp_marketplace_license import verify_license")
@@ -195,7 +229,7 @@ def render_server(
 
     lines.append("# --- END IMPORTS ---")
     lines.append("")
-    lines.append(f'mcp = FastMCP("{package_name}")')
+    lines.append(f'mcp = MCPServer("{package_name}", version="1.0.0")')
 
     if paid:
         lines.append("")
@@ -219,7 +253,7 @@ def render_server(
     for tool in tools:
         tool_name = tool["name"]
         tool_desc = tool.get("description", f"{tool_name} tool")
-        params = tool.get("parameters", [])
+        params = _ordered_params(tool.get("parameters", []))
         is_gated = paid and (not gated or tool_name in gated)
 
         # Build parameter list
@@ -260,7 +294,20 @@ def render_server(
     lines.append('    """Run the MCP server."""')
     if hosting == "remote":
         lines.append('    port = int(os.environ.get("PORT", "8000"))')
-        lines.append('    mcp.run(transport="sse", host="0.0.0.0", port=port)')
+        # 0.0.0.0 disables the automatic localhost Host/Origin allowlist, so pass
+        # TransportSecuritySettings explicitly rather than binding wide with no guard.
+        # FAIL CLOSED. Binding 0.0.0.0 disables the automatic localhost allowlist, so an
+        # unset MCP_ALLOWED_HOSTS means "publicly bound with no Host/Origin validation".
+        # A warning does not protect anything — refuse to start instead.
+        lines.append('    allowed = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]')
+        lines.append('    if not allowed:')
+        lines.append('        sys.exit(')
+        lines.append('            "[mcp] REFUSING TO START: binding 0.0.0.0 requires MCP_ALLOWED_HOSTS "')
+        lines.append('            "(comma-separated Host values), otherwise Host/Origin validation is disabled "')
+        lines.append('            "and the server is exposed to DNS-rebinding. Example: MCP_ALLOWED_HOSTS=my.host,localhost"')
+        lines.append('        )')
+        lines.append('    sec = TransportSecuritySettings(allowed_hosts=allowed)')
+        lines.append('    mcp.run(transport="streamable-http", host="0.0.0.0", port=port, transport_security=sec)')
     else:
         lines.append("    mcp.run()")
     lines.append("")
@@ -277,7 +324,7 @@ def render_tool_module(package_name: str, tool: dict) -> str:
     module_name = _to_module_name(package_name)
     tool_name = tool["name"]
     tool_desc = tool.get("description", f"{tool_name} tool")
-    params = tool.get("parameters", [])
+    params = _ordered_params(tool.get("parameters", []))
     returns = tool.get("returns", "Result as JSON string")
 
     # Build function signature
@@ -327,7 +374,7 @@ def render_service_module(tool: dict) -> str:
     """Render a service stub (services/<name>_service.py)."""
     tool_name = tool["name"]
     tool_desc = tool.get("description", f"{tool_name} service")
-    params = tool.get("parameters", [])
+    params = _ordered_params(tool.get("parameters", []))
     class_name = _to_class_name(tool_name)
 
     param_parts = []
@@ -406,7 +453,7 @@ def render_test_tool(package_name: str, tool: dict) -> str:
     """Render a basic test for a single tool."""
     module_name = _to_module_name(package_name)
     tool_name = tool["name"]
-    params = tool.get("parameters", [])
+    params = _ordered_params(tool.get("parameters", []))
 
     # Build test call args
     test_args = []
@@ -463,13 +510,15 @@ def render_readme(
     if hosting == "local":
         sections += [
             "## Install", "",
+            "```bash", f"uvx {package_name}", "```", "",
+            "Or install permanently:", "",
             "```bash", f"pip install {package_name}", "```", "",
         ]
     else:
         sections += [
             "## Connect", "",
             "This is a remote MCP server. Add to your Claude Code config:", "",
-            "```json", "{", f'  "mcpServers": {{', f'    "{package_name}": {{',
+            "```json", "{", '  "mcpServers": {', f'    "{package_name}": {{',
             f'      "url": "https://your-server.com/mcp"',
             "    }", "  }", "}", "```", "",
         ]
@@ -487,18 +536,21 @@ def render_readme(
     if hosting == "local":
         sections += [
             "## Usage with Claude Code", "",
-            "Add to your Claude Code MCP config (`~/.claude/settings.json`):", "",
-            "```json", "{{", '  "mcpServers": {{',
+            "```bash",
+            f'claude mcp add {package_name} -- uvx {package_name}',
+            "```", "",
+            "Or add to your MCP config (`~/.claude/settings.json`):", "",
+            "```json", "{", '  "mcpServers": {',
             f'    "{package_name}": {{',
-            f'      "command": "{package_name}",',
-            '      "args": []',
+            f'      "command": "uvx",',
+            f'      "args": ["{package_name}"]',
         ]
         if paid:
-            sections[-1] = '      "args": [],'
+            sections[-1] = f'      "args": ["{package_name}"],'
             sections += [
                 f'      "env": {{ "MCP_LICENSE_KEY": "mcp_live_your_key_here" }}',
             ]
-        sections += ["    }}", "  }}", "}}", "```", ""]
+        sections += ["    }", "  }", "}", "```", ""]
     elif hosting == "remote":
         sections += [
             "## Deployment", "",
@@ -555,7 +607,7 @@ def render_add_tool_registration(tool: dict) -> str:
     """Render the @mcp.tool decorated function for a new tool."""
     tool_name = tool["name"]
     tool_desc = tool.get("description", f"{tool_name} tool")
-    params = tool.get("parameters", [])
+    params = _ordered_params(tool.get("parameters", []))
 
     param_parts = []
     for p in params:
